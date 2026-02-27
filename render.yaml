@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: reconciliation-agent
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false   # Paste your key manually in the Render dashboard
+      - key: PYTHON_VERSION
+        value: "3.11.0"
