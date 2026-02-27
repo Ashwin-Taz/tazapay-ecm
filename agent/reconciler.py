@@ -1,7 +1,7 @@
 """
 reconciler.py
 -------------
-Sends ingested file content to Claude and returns the raw CSV response.
+Sends ingested content to Claude and returns the raw CSV response.
 """
 
 import os
@@ -23,23 +23,18 @@ def run_reconciliation(
     max_tokens: int = 8096,
 ) -> str:
     """
-    Run the 4-phase reconciliation via Claude.
+    Run the 4-phase error code mapping via Claude.
 
     Parameters
     ----------
-    internal_errors_text : str
-        CSV string of internal error codes (from Excel/CSV ingestion).
-    psp_documentation_text : str
-        Plain text extracted from the PSP PDF.
-    model : str
-        Claude model to use. Defaults to claude-opus-4-6 for best reasoning.
-    max_tokens : int
-        Maximum tokens for the response.
+    internal_errors_text   : CSV string of internal error codes
+    psp_documentation_text : Plain text extracted from PSP source
+    model                  : Claude model string
+    max_tokens             : Maximum response tokens
 
     Returns
     -------
-    str
-        Raw response from Claude (should be a CSV string).
+    str — Raw Claude response (CSV string)
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -51,19 +46,20 @@ def run_reconciliation(
     client = anthropic.Anthropic(api_key=api_key)
     system_prompt = _load_system_prompt()
 
-    user_message = f"""Here are the two inputs for reconciliation:
+    user_message = f"""Here are the two inputs for error code mapping:
 
-## INTERNAL ERROR CODES (from Excel/CSV):
+## INTERNAL ERROR CODES:
 {internal_errors_text}
 
 ---
 
-## PSP ERROR DOCUMENTATION (from PDF):
+## PSP ERROR DOCUMENTATION:
 {psp_documentation_text}
 
 ---
 
-Please run all 4 phases (Forward Mapping, Reverse Mapping, Closest Partial Matching, Deduplicate and Consolidate) and produce the final consolidated CSV exactly as specified in your instructions.
+Please run all 4 phases (Forward Mapping, Reverse Mapping, Closest Partial Matching, \
+Deduplicate and Consolidate) and produce the final consolidated CSV exactly as specified.
 
 Return ONLY the raw CSV. No markdown, no code fences, no commentary. Start with the header row."""
 

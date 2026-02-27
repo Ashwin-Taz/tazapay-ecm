@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: reconciliation-agent
+    name: error-code-mapping-agent
     runtime: python
     region: oregon
     plan: free
@@ -8,6 +8,6 @@ services:
     startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     envVars:
       - key: ANTHROPIC_API_KEY
-        sync: false   # Paste your key manually in the Render dashboard
+        sync: false
       - key: PYTHON_VERSION
         value: "3.11.0"
