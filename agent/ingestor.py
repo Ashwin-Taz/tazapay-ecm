@@ -1,13 +1,6 @@
 """
-ingestor.py
------------
-Handles file ingestion from:
-  - Streamlit UploadedFile objects (.xlsx, .xls, .csv, .pdf)
-  - Public URLs (GitHub raw, S3, Dropbox, etc.)
-  - Google Sheets share links (no API key required)
-
-Internal error codes: Google Sheets / Excel / CSV / URL
-PSP documentation:    Google Sheets / Excel / CSV / PDF / URL
+ingestor.py — Error Code Mapping Agent
+Supports: Google Sheets / Webpage URLs / Excel / CSV / PDF
 """
 
 import re
@@ -17,166 +10,107 @@ import pandas as pd
 from io import BytesIO
 
 
-# ---------------------------------------------------------------------------
-# Google Sheets
-# ---------------------------------------------------------------------------
-
 def is_google_sheets_url(url: str) -> bool:
     return "docs.google.com/spreadsheets" in url
 
 
-def _extract_sheet_id(url: str) -> str:
+def fetch_google_sheet(url: str) -> str:
     match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
     if not match:
+        raise ValueError("Could not extract spreadsheet ID. Paste the full sharing link.")
+    sheet_id = match.group(1)
+    gid_match = re.search(r"gid=(\d+)", url)
+    gid = gid_match.group(1) if gid_match else "0"
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    r = requests.get(export_url, headers={"User-Agent": "ErrorCodeMappingAgent/1.0"}, timeout=60)
+    if r.status_code in (401, 403):
+        raise PermissionError("Google Sheets access denied. Set sharing to 'Anyone with the link can view'.")
+    r.raise_for_status()
+    return pd.read_csv(BytesIO(r.content)).to_csv(index=False)
+
+
+def is_web_page_url(url: str) -> bool:
+    if not url.startswith("http") or is_google_sheets_url(url):
+        return False
+    last_seg = url.split("?")[0].lower().split("/")[-1]
+    ext = last_seg.rsplit(".", 1)[-1] if "." in last_seg else ""
+    return ext not in {"xlsx", "xls", "csv", "pdf", "json", "txt", "xml"}
+
+
+def fetch_webpage_as_text(url: str) -> str:
+    from html.parser import HTMLParser
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; ErrorCodeMappingAgent/1.0)"}, timeout=60)
+    r.raise_for_status()
+    if "application/pdf" in r.headers.get("content-type", ""):
+        return _parse_pdf(r.content)
+
+    class _Extractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts, self._skip = [], False
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script","style","nav","footer","head"): self._skip = True
+        def handle_endtag(self, tag):
+            if tag in ("script","style","nav","footer","head"): self._skip = False
+            if tag in ("p","li","tr","h1","h2","h3","h4","div","td","th","br"): self.parts.append("\n")
+        def handle_data(self, data):
+            if not self._skip and data.strip(): self.parts.append(data.strip())
+
+    p = _Extractor()
+    p.feed(r.text)
+    text = " ".join(p.parts)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r" {2,}", " ", text)
+    if len(text.strip()) < 100:
         raise ValueError(
-            "Could not extract spreadsheet ID from the Google Sheets URL. "
-            "Make sure you paste the full sharing link."
+            "Page appears empty after parsing — it may require login or be JS-rendered. "
+            "Try downloading as PDF and uploading instead."
         )
-    return match.group(1)
-
-
-def _extract_gid(url: str) -> str:
-    match = re.search(r"gid=(\d+)", url)
-    return match.group(1) if match else "0"
-
-
-def fetch_google_sheet(url: str) -> str:
-    """
-    Fetch a Google Sheet as CSV text.
-    Sheet must be shared as 'Anyone with the link can view'.
-    No API key or OAuth needed.
-    """
-    sheet_id = _extract_sheet_id(url)
-    gid = _extract_gid(url)
-    export_url = (
-        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-        f"/export?format=csv&gid={gid}"
-    )
-    headers = {"User-Agent": "ErrorCodeMappingAgent/1.0"}
-    response = requests.get(export_url, headers=headers, timeout=60)
-
-    if response.status_code in (401, 403):
-        raise PermissionError(
-            "Google Sheets access denied. "
-            "Set sharing to 'Anyone with the link can view' and try again."
-        )
-    if response.status_code != 200:
-        raise ConnectionError(
-            f"Failed to fetch Google Sheet (HTTP {response.status_code}). "
-            "Check that the link is correct and the sheet is publicly shared."
-        )
-    df = pd.read_csv(BytesIO(response.content))
-    return df.to_csv(index=False)
-
-
-# ---------------------------------------------------------------------------
-# General helpers
-# ---------------------------------------------------------------------------
-
-def _fetch_url(url: str) -> bytes:
-    headers = {"User-Agent": "ErrorCodeMappingAgent/1.0"}
-    response = requests.get(url, headers=headers, timeout=60)
-    response.raise_for_status()
-    return response.content
+    return f"[Source: {url}]\n\n{text.strip()}"
 
 
 def _to_bytes(source) -> bytes:
-    if isinstance(source, bytes):
-        return source
+    if isinstance(source, bytes): return source
     if isinstance(source, str):
-        return _fetch_url(source)
-    if hasattr(source, "read"):
-        return source.read()
+        r = requests.get(source, headers={"User-Agent": "ErrorCodeMappingAgent/1.0"}, timeout=60)
+        r.raise_for_status()
+        return r.content
+    if hasattr(source, "read"): return source.read()
     raise TypeError(f"Unsupported source type: {type(source)}")
 
-
-# ---------------------------------------------------------------------------
-# Parsers
-# ---------------------------------------------------------------------------
-
-def _parse_excel(raw: bytes) -> str:
-    df = pd.read_excel(BytesIO(raw))
-    return df.to_csv(index=False)
-
-
-def _parse_csv_bytes(raw: bytes) -> str:
-    df = pd.read_csv(BytesIO(raw))
-    return df.to_csv(index=False)
-
-
-def _parse_pdf(raw: bytes) -> str:
-    text_parts = []
+def _parse_excel(raw): return pd.read_excel(BytesIO(raw)).to_csv(index=False)
+def _parse_csv(raw):   return pd.read_csv(BytesIO(raw)).to_csv(index=False)
+def _parse_pdf(raw):
+    parts = []
     with pdfplumber.open(BytesIO(raw)) as pdf:
         for i, page in enumerate(pdf.pages):
-            page_text = page.extract_text()
-            if page_text:
-                text_parts.append(f"--- Page {i + 1} ---\n{page_text}")
-    if not text_parts:
-        raise ValueError(
-            "PDF appears to be scanned/image-only. No text could be extracted."
-        )
-    return "\n\n".join(text_parts)
+            t = page.extract_text()
+            if t: parts.append(f"--- Page {i+1} ---\n{t}")
+    if not parts:
+        raise ValueError("PDF appears scanned/image-only — no text could be extracted.")
+    return "\n\n".join(parts)
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def ingest(source, file_type: str) -> str:
-    """
-    Ingest a file and return its content as a string.
-
-    Parameters
-    ----------
-    source      : Google Sheets URL str | public URL str | bytes | UploadedFile
-    file_type   : 'google_sheets' | 'excel' | 'csv' | 'pdf'
-
-    Returns
-    -------
-    str  — CSV text for spreadsheet types; plain text for PDF
-    """
-    file_type = file_type.lower().strip()
-
-    if file_type == "google_sheets":
-        if not isinstance(source, str):
-            raise ValueError("Google Sheets source must be a URL string.")
-        return fetch_google_sheet(source)
-
+    ft = file_type.lower().strip()
+    if ft == "google_sheets": return fetch_google_sheet(source)
+    if ft == "webpage":       return fetch_webpage_as_text(source)
     raw = _to_bytes(source)
-
-    if file_type in ("excel", "xlsx", "xls"):
-        return _parse_excel(raw)
-    elif file_type == "csv":
-        return _parse_csv_bytes(raw)
-    elif file_type == "pdf":
-        return _parse_pdf(raw)
-    else:
-        raise ValueError(
-            f"Unsupported file_type '{file_type}'. "
-            "Choose from: 'google_sheets', 'excel', 'csv', 'pdf'."
-        )
+    if ft in ("excel","xlsx","xls"): return _parse_excel(raw)
+    if ft == "csv":                  return _parse_csv(raw)
+    if ft == "pdf":                  return _parse_pdf(raw)
+    raise ValueError(f"Unsupported file_type '{ft}'.")
 
 
 def detect_file_type(filename: str) -> str:
-    """
-    Infer file_type from a filename or URL.
-    Automatically detects Google Sheets URLs.
-    Returns: 'google_sheets' | 'excel' | 'csv' | 'pdf'
-    """
-    if is_google_sheets_url(filename):
-        return "google_sheets"
-
-    clean = filename.split("?")[0].lower()
-    ext = clean.rsplit(".", 1)[-1]
-    mapping = {
-        "xlsx": "excel",
-        "xls":  "excel",
-        "csv":  "csv",
-        "pdf":  "pdf",
-    }
+    if is_google_sheets_url(filename): return "google_sheets"
+    if filename.startswith("http") and is_web_page_url(filename): return "webpage"
+    last_seg = filename.split("?")[0].lower().split("/")[-1]
+    ext = last_seg.rsplit(".", 1)[-1] if "." in last_seg else ""
+    mapping = {"xlsx":"excel","xls":"excel","csv":"csv","pdf":"pdf"}
     if ext not in mapping:
         raise ValueError(
-            f"Cannot detect file type from extension '.{ext}'. "
-            "Supported: Google Sheets URL / .xlsx / .xls / .csv / .pdf"
+            f"Cannot detect file type from '.{ext}'. "
+            "Supported: Google Sheets URL / webpage URL / .xlsx / .xls / .csv / .pdf"
         )
     return mapping[ext]
